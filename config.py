@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import urllib.parse
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -29,8 +30,18 @@ PLACEHOLDER_ADMIN = "123456789"
 PLACEHOLDER_TOKEN = "123456789:AAExampleTokenReplaceMe"
 
 
+def _unquote(raw: str) -> str:
+    """Strip surrounding quotes.
+
+    python-dotenv removes them when reading a .env file, but platform dashboards
+    (App Platform, Railway, ...) pass values through verbatim — so a pasted
+    "6651698857" would otherwise fail to parse as an integer.
+    """
+    return raw.strip().strip('"').strip("'").strip()
+
+
 def _parse_ids(raw: str) -> list[int]:
-    cleaned = raw.replace(",", " ").split()
+    cleaned = _unquote(raw).replace(",", " ").split()
     out: list[int] = []
     for chunk in cleaned:
         try:
@@ -54,7 +65,7 @@ def _parse_float(name: str, default: float, minimum: float) -> float:
 
 
 def _database_url() -> str:
-    raw = os.getenv("DATABASE_URL", "").strip().strip('"').strip("'")
+    raw = _unquote(os.getenv("DATABASE_URL", ""))
     if not raw:
         raise ConfigError(
             "DATABASE_URL is not set.\n"
@@ -66,11 +77,40 @@ def _database_url() -> str:
         raise ConfigError(
             f"DATABASE_URL must start with postgresql:// (got {raw.split(':', 1)[0]}://)"
         )
-    if "[YOUR-PASSWORD]" in raw or "YOUR-PASSWORD" in raw:
+    if "YOUR-PASSWORD" in raw:
         raise ConfigError(
             "DATABASE_URL still contains the [YOUR-PASSWORD] placeholder.\n"
             "  Replace it with the database password you set when creating the project."
         )
+    if "[" in raw or "]" in raw:
+        raise ConfigError(
+            "DATABASE_URL contains square brackets — remove them.\n"
+            "  Supabase shows the password as [YOUR-PASSWORD]; the brackets are just\n"
+            "  markers, not part of the value. Keep the password, drop the [ and ].\n"
+            "    wrong:  ...:[MyPassword]@aws-1-...\n"
+            "    right:  ...:MyPassword@aws-1-...\n"
+            "  (Left in, urllib reads them as an IPv6 literal and connection fails.)"
+        )
+    # A well-formed DSN has exactly one '@' separating credentials from host.
+    authority = raw.split("://", 1)[1].split("/", 1)[0]
+    if authority.count("@") > 1:
+        raise ConfigError(
+            "The password in DATABASE_URL contains '@', which breaks URL parsing.\n"
+            "  Percent-encode it as %40, or reset the database password to letters\n"
+            "  and numbers only (Supabase -> Settings -> Database -> Reset password)."
+        )
+
+    try:
+        parsed = urllib.parse.urlparse(raw)
+        host = parsed.hostname
+    except ValueError as exc:
+        raise ConfigError(
+            f"DATABASE_URL could not be parsed as a URL: {exc}\n"
+            "  Usually a stray character in the password. Percent-encode it, or reset\n"
+            "  the password to letters and numbers only."
+        ) from exc
+    if not host:
+        raise ConfigError("DATABASE_URL has no hostname — copy the whole URI from Supabase.")
     # Supabase direct connections resolve to IPv6 only. Most hosts (App Platform
     # included) are IPv4, where this fails with a confusing 'network unreachable'.
     if ".supabase.co" in raw and "pooler.supabase.com" not in raw:
@@ -109,7 +149,7 @@ class Config:
 
 
 def load_config() -> Config:
-    token = os.getenv("BOT_TOKEN", "").strip().strip('"').strip("'")
+    token = _unquote(os.getenv("BOT_TOKEN", ""))
     if not token:
         raise ConfigError("BOT_TOKEN is not set. Copy .env.example to .env and fill it in.")
     if token == PLACEHOLDER_TOKEN:
@@ -125,7 +165,7 @@ def load_config() -> Config:
             "  Copy it again from @BotFather - it's easy to truncate."
         )
 
-    vault_raw = os.getenv("VAULT_CHAT_ID", "").strip()
+    vault_raw = _unquote(os.getenv("VAULT_CHAT_ID", ""))
     vault_chat_id: int | None = None
     if vault_raw and vault_raw != PLACEHOLDER_VAULT:
         try:
@@ -135,7 +175,7 @@ def load_config() -> Config:
                 f"VAULT_CHAT_ID must be a numeric id like -1001234567890, got {vault_raw!r}"
             ) from exc
 
-    admin_raw = os.getenv("ADMIN_IDS", "").strip()
+    admin_raw = _unquote(os.getenv("ADMIN_IDS", ""))
     admin_ids = [] if admin_raw == PLACEHOLDER_ADMIN else _parse_ids(admin_raw)
 
     return Config(

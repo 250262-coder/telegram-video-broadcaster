@@ -120,9 +120,17 @@ def build_router(
             kind, file_id = "video", message.video.file_id
         elif message.animation:
             kind, file_id = "animation", message.animation.file_id
+        elif message.video_note:
+            kind, file_id = "video_note", message.video_note.file_id
         elif message.document and (message.document.mime_type or "").startswith("video/"):
             kind, file_id = "document", message.document.file_id
         else:
+            if message.chat.id == cfg.vault_chat_id:
+                log.info(
+                    "Ignored a %s in the vault — only videos, GIFs, video notes and "
+                    "video documents go into rotation.",
+                    message.content_type,
+                )
             return
 
         # Loud about mismatches: a wrong VAULT_CHAT_ID otherwise looks like the
@@ -148,8 +156,9 @@ def build_router(
                 f"➕ Added {kind} to rotation (msg {message.message_id}). Queue size: {total}."
             )
 
-    router.channel_post.register(ingest, F.video | F.animation | F.document)
-    router.message.register(ingest, F.video | F.animation | F.document, F.chat.type != "private")
+    MEDIA = F.video | F.animation | F.video_note | F.document
+    router.channel_post.register(ingest, MEDIA)
+    router.message.register(ingest, MEDIA, F.chat.type != "private")
 
     # ---------- group membership ----------
 
@@ -372,5 +381,26 @@ def build_router(
             return
         await db.set_paused(False)
         await message.answer(f"Resumed. Next run {_fmt_dt(next_run(scheduler))}.")
+
+    # ---------- catch-all, registered last so it only sees leftovers ----------
+    # Turns aiogram's bare "Update is not handled" into something diagnosable.
+
+    @router.channel_post()
+    async def unhandled_channel_post(message: Message) -> None:
+        log.info(
+            "Unhandled channel post: chat=%s (%s) type=%s",
+            message.chat.id, message.chat.title, message.content_type,
+        )
+
+    @router.message()
+    async def unhandled_message(message: Message) -> None:
+        log.info(
+            "Unhandled message: chat=%s (%s) type=%s text=%r",
+            message.chat.id, message.chat.type, message.content_type,
+            (message.text or "")[:60],
+        )
+        # Only answer admins in DMs — never chatter in a target group.
+        if message.chat.type == "private" and is_admin(message) and (message.text or "").startswith("/"):
+            await message.answer("Unknown command. Send /help for the list.")
 
     return router

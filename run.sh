@@ -33,8 +33,10 @@ source .venv/bin/activate
 # Only reinstall when requirements.txt is newer than the last install marker.
 if [ ! -f .venv/.installed ] || [ requirements.txt -nt .venv/.installed ]; then
   echo "==> Installing dependencies"
-  pip install --quiet --upgrade pip
-  pip install --quiet -r requirements.txt
+  # 'python -m pip' rather than bare 'pip': guarantees the packages land in the
+  # interpreter we're about to run, even if PATH or a shell alias says otherwise.
+  python -m pip install --quiet --upgrade pip
+  python -m pip install --quiet -r requirements.txt
   touch .venv/.installed
 fi
 
