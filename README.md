@@ -7,7 +7,7 @@ Posts videos from a private "vault" channel into every group the bot is in, on a
 ## How it works
 
 ```
-you upload video ──▶ private vault channel ──▶ bot records message_id in SQLite
+you upload video ──▶ private vault channel ──▶ bot records message_id in Postgres
                                                         │
                                     every N hours, pick least-recently-sent
                                                         │
@@ -27,16 +27,22 @@ Then `/setprivacy` → **Disable** — otherwise the bot can't see commands in g
 - New Telegram channel, **Private**. Name it anything ("Video Vault").
 - Add your bot as an **administrator** with "Post messages" permission.
 
-**3. Configure and run**
+**3. Create the database**
+
+State lives in Postgres, not on disk — see [SUPABASE.md](SUPABASE.md) for the
+walkthrough. Short version: create a free Supabase project and copy the
+**Session pooler** connection string into `DATABASE_URL`.
+
+**4. Configure and run**
 
 ```bash
-cp .env.example .env      # put in BOT_TOKEN only; leave the other two as-is
+cp .env.example .env      # add BOT_TOKEN and DATABASE_URL; leave the other two as-is
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python bot.py
 ```
 
-**4. Get your IDs from the bot itself**
+**5. Get your IDs from the bot itself**
 
 With the placeholders untouched the bot starts in **setup mode**. DM it:
 
@@ -45,7 +51,7 @@ With the placeholders untouched the bot starts in **setup mode**. DM it:
 
 Paste both into `.env` and restart. Full walkthrough in [TESTING.md](TESTING.md).
 
-**5. Load videos and groups**
+**6. Load videos and groups**
 
 - Upload videos into the vault channel. Each one gets registered automatically and you get a DM confirmation. (Upload from your Telegram app, not through the bot — that way you're not capped at the 50MB bot upload limit; the vault accepts up to 2GB per file.)
 - Add the bot to each target group. It registers itself on join. If it was already in a group before the bot ran, send `/here` in that group.
@@ -80,14 +86,29 @@ If you push into 100+ groups, raise the delay rather than lowering it. Getting t
 
 ## Deploy
 
-### VPS + systemd (recommended, ~$5/mo)
+State lives in Postgres, so the container is disposable. Full walkthrough in
+[SUPABASE.md](SUPABASE.md).
 
-Any small box works — Hetzner CX22, DigitalOcean, Vultr, Contabo. Long polling means **no domain and no TLS certificate needed**.
+### DigitalOcean App Platform (~$5/mo)
+
+1. Push the repo to GitHub (`.env` is gitignored — verify with `git status`).
+2. Create → Apps → pick the repo. It detects the `Dockerfile`.
+3. **Change the component type from Web Service to Worker.** This is the step
+   everyone misses: a long-polling bot never binds a port, so a Web Service fails
+   its health check and restarts forever. Workers aren't health-checked.
+4. Add `BOT_TOKEN` and `DATABASE_URL` as **encrypted** env vars, plus
+   `VAULT_CHAT_ID` and `ADMIN_IDS` as plain ones.
+5. Deploy, then watch the runtime logs for the `Running as @yourbot` banner.
+
+`.do/app.yaml` holds this spec if you'd rather import it than click through.
+
+### VPS + systemd
+
+Any small box works. Long polling means **no domain and no TLS certificate needed**.
 
 ```bash
-# on the server
 sudo adduser --system --group --home /opt/videobot botuser
-sudo -u botuser git clone <your-repo> /opt/videobot   # or scp the folder
+sudo -u botuser git clone <your-repo> /opt/videobot
 cd /opt/videobot
 sudo -u botuser python3 -m venv .venv
 sudo -u botuser .venv/bin/pip install -r requirements.txt
@@ -95,7 +116,7 @@ sudo -u botuser cp .env.example .env && sudo -u botuser nano .env
 
 sudo cp deploy/videobot.service /etc/systemd/system/
 sudo systemctl enable --now videobot
-journalctl -u videobot -f      # watch logs
+journalctl -u videobot -f
 ```
 
 ### Docker
@@ -106,26 +127,31 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
-The `data/` volume holds the SQLite file — keep it, it's your video catalogue and send history.
-
 ### What not to use
 
-Vercel, Netlify, and Lambda are wrong for this. You need a process that stays alive to hold the scheduler and the polling loop; serverless functions get frozen between requests. Railway, Fly.io, and Render work, but attach a **persistent volume** for `data/` or you lose the catalogue on every redeploy.
+Vercel, Netlify, and Lambda are wrong for this — you need a process that stays alive
+to hold the scheduler and the polling loop, and serverless functions get frozen
+between requests.
+
+**Only ever run one instance.** Telegram allows a single poller per token; a second
+one produces `Conflict: terminated by other getUpdates request` in both logs.
 
 ## Notes
 
 - `CAPTION_SUFFIX` appends a CTA to every caption. It rewrites the caption, so bold/links in the *original* caption lose their formatting — put HTML in the suffix itself, or leave the setting blank to copy captions untouched.
 - Photos and text posts in the vault are ignored. Videos, GIFs/animations, and video documents are registered.
 - Deleting a video from the vault channel: the bot drops it from rotation the first time a copy fails with "message to copy not found".
-- `send_log` keeps a row per (video, group, outcome). Handy for proving delivery: `sqlite3 data/broadcaster.db "select * from send_log order by id desc limit 20"`.
+- `send_log` keeps a row per (video, group, outcome). Handy for proving delivery: `psql "$DATABASE_URL" -c 'select * from send_log order by id desc limit 20'`.
 
 ## Files
 
 ```
 bot.py            entrypoint: DI wiring, polling, scheduler start
 config.py         .env parsing and validation
-db.py             SQLite schema + queries (videos, groups, send_log, settings)
+db.py             Postgres schema + queries via asyncpg (videos, groups, send_log, settings)
 broadcaster.py    the fan-out loop: copy_message, delays, retries, backoff
 handlers.py       commands, vault ingestion, group join/leave tracking
 scheduling.py     APScheduler interval job, restart-safe next-run calculation
+SUPABASE.md       database + App Platform deployment walkthrough
+.do/app.yaml      App Platform spec (worker, not web service)
 ```

@@ -7,6 +7,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
-RUN mkdir -p /app/data
 
+# Long-polling worker: no port is exposed on purpose. State lives in Postgres,
+# because App Platform containers have an ephemeral filesystem.
 CMD ["python", "bot.py"]

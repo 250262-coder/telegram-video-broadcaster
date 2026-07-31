@@ -15,7 +15,8 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Put only your **BOT_TOKEN** in `.env` for now. Leave `ADMIN_IDS` and
+Put your **BOT_TOKEN** and **DATABASE_URL** in `.env` for now
+(see [SUPABASE.md](SUPABASE.md) for the connection string). Leave `ADMIN_IDS` and
 `VAULT_CHAT_ID` at their placeholder values — the bot detects those and starts in
 **setup mode** instead of trying to post into a fake chat.
 
@@ -135,11 +136,11 @@ Also test the brake:
 
 With the bot running, note "Next run" from `/status`. Ctrl-C, restart, check
 `/status` again — the next run should be roughly the same moment, not reset to
-now. The schedule is anchored to the last run stored in SQLite, so a restart
+now. The schedule is anchored to the last run stored in Postgres, so a restart
 (or a server reboot) doesn't cause a double-send or a skipped cycle.
 
-Your videos and groups should still be listed. If they vanished, `DB_PATH` is
-pointing somewhere that isn't persisting.
+Your videos and groups should still be listed. If they vanished, `DATABASE_URL` points
+at a different project than before.
 
 ---
 
@@ -156,7 +157,7 @@ Worth doing once, so you recognise the behaviour in production:
 Check the audit trail afterwards:
 
 ```bash
-sqlite3 data/broadcaster.db "select sent_at, video_id, chat_id, status, detail from send_log order by id desc limit 20"
+psql "$DATABASE_URL" -c 'select sent_at, video_id, chat_id, status, detail from send_log order by id desc limit 20'
 ```
 
 ---
@@ -168,7 +169,7 @@ sqlite3 data/broadcaster.db "select sent_at, video_id, chat_id, status, detail f
 - [ ] Real videos in the vault, checked with `/videos`
 - [ ] Every real group added and visible in `/groups`
 - [ ] Bot is admin in groups that use slow mode (admins bypass it; members don't)
-- [ ] `.env` is **not** committed to git (`.gitignore` covers it)
+- [ ] `.env` is **not** committed to git (`.gitignore` covers it) — check with `git status`
 - [ ] Running under systemd or Docker with restart-on-failure, not in a terminal
 
 First live day: leave `/status` handy and check that "Last run" keeps advancing.

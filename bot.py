@@ -27,7 +27,7 @@ log = logging.getLogger("bot")
 async def main() -> None:
     cfg = load_config()
 
-    db = Database(cfg.db_path)
+    db = Database(cfg.database_url)
     await db.connect()
 
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))

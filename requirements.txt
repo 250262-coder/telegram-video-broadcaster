@@ -2,5 +2,5 @@
 # so no Rust toolchain is required to install pydantic-core.
 aiogram==3.30.0
 apscheduler==3.11.3
-aiosqlite==0.22.1
+asyncpg==0.31.0
 python-dotenv==1.2.2

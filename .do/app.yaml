@@ -1,0 +1,41 @@
+# DigitalOcean App Platform spec.
+# Create -> Apps -> your GitHub repo -> "Edit Plan" -> import this, or just make
+# sure the component type is WORKER (not Web Service).
+#
+# A long-polling bot never binds a port. A Web Service health-checks the port,
+# finds nothing, and restarts the container forever. Worker has no health check.
+name: telegram-video-broadcaster
+
+workers:
+  - name: broadcaster
+    github:
+      repo: YOUR_GITHUB_USER/telegram-video-broadcaster
+      branch: main
+      deploy_on_push: true
+
+    dockerfile_path: Dockerfile
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-0.5gb
+
+    envs:
+      - key: BOT_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+      - key: DATABASE_URL
+        scope: RUN_TIME
+        type: SECRET
+      - key: VAULT_CHAT_ID
+        scope: RUN_TIME
+        value: "-1004416731612"
+      - key: ADMIN_IDS
+        scope: RUN_TIME
+        value: "6651698857"
+      - key: INTERVAL_HOURS
+        scope: RUN_TIME
+        value: "4"
+      - key: DELAY_BETWEEN_GROUPS
+        scope: RUN_TIME
+        value: "2.0"
+      - key: CAPTION_SUFFIX
+        scope: RUN_TIME
+        value: ""

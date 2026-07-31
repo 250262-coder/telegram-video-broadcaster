@@ -7,6 +7,7 @@ chicken-and-egg problem of needing your Telegram id before you can configure it.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 
 load_dotenv()
+log = logging.getLogger(__name__)
 
 
 class ConfigError(RuntimeError):
@@ -51,6 +53,35 @@ def _parse_float(name: str, default: float, minimum: float) -> float:
     return value
 
 
+def _database_url() -> str:
+    raw = os.getenv("DATABASE_URL", "").strip().strip('"').strip("'")
+    if not raw:
+        raise ConfigError(
+            "DATABASE_URL is not set.\n"
+            "  Supabase -> Project Settings -> Database -> Connection string -> URI\n"
+            "  Use the *Session pooler* entry (host ends in .pooler.supabase.com),\n"
+            "  and replace [YOUR-PASSWORD] with your database password."
+        )
+    if not raw.startswith(("postgres://", "postgresql://")):
+        raise ConfigError(
+            f"DATABASE_URL must start with postgresql:// (got {raw.split(':', 1)[0]}://)"
+        )
+    if "[YOUR-PASSWORD]" in raw or "YOUR-PASSWORD" in raw:
+        raise ConfigError(
+            "DATABASE_URL still contains the [YOUR-PASSWORD] placeholder.\n"
+            "  Replace it with the database password you set when creating the project."
+        )
+    # Supabase direct connections resolve to IPv6 only. Most hosts (App Platform
+    # included) are IPv4, where this fails with a confusing 'network unreachable'.
+    if ".supabase.co" in raw and "pooler.supabase.com" not in raw:
+        log.warning(
+            "DATABASE_URL uses the direct Supabase host, which is IPv6-only. "
+            "If connecting fails, switch to the Session pooler URI "
+            "(host ends in .pooler.supabase.com)."
+        )
+    return raw
+
+
 @dataclass(frozen=True)
 class Config:
     bot_token: str
@@ -59,7 +90,7 @@ class Config:
     interval_hours: float
     delay_between_groups: float
     caption_suffix: str
-    db_path: str
+    database_url: str
 
     def is_admin(self, user_id: int | None) -> bool:
         return user_id is not None and user_id in self.admin_ids
@@ -114,5 +145,5 @@ def load_config() -> Config:
         interval_hours=_parse_float("INTERVAL_HOURS", 4.0, 0.05),
         delay_between_groups=_parse_float("DELAY_BETWEEN_GROUPS", 2.0, 0.0),
         caption_suffix=os.getenv("CAPTION_SUFFIX", ""),
-        db_path=os.getenv("DB_PATH", "data/broadcaster.db").strip() or "data/broadcaster.db",
+        database_url=_database_url(),
     )
