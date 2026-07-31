@@ -18,22 +18,11 @@ workers:
     instance_count: 1
     instance_size_slug: apps-s-1vcpu-0.5gb
 
-    # The four SECRET keys have no value here on purpose — fill them in under
-    # Settings -> your component -> Environment Variables in the dashboard.
-    # App Platform encrypts them there; leaving them out keeps them off GitHub.
+    # BOT_TOKEN, DATABASE_URL, VAULT_CHAT_ID and ADMIN_IDS are deliberately NOT
+    # listed here. Set them as App-Level environment variables in the dashboard
+    # instead — that keeps them off GitHub, and a component-level key with no
+    # value would override the app-level one with an empty string.
     envs:
-      - key: BOT_TOKEN
-        scope: RUN_TIME
-        type: SECRET
-      - key: DATABASE_URL
-        scope: RUN_TIME
-        type: SECRET
-      - key: VAULT_CHAT_ID
-        scope: RUN_TIME
-        type: SECRET
-      - key: ADMIN_IDS
-        scope: RUN_TIME
-        type: SECRET
       - key: INTERVAL_HOURS
         scope: RUN_TIME
         value: "4"
