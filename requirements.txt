@@ -1,0 +1,6 @@
+# Needs Python 3.10-3.14. These versions ship prebuilt wheels for 3.13/3.14,
+# so no Rust toolchain is required to install pydantic-core.
+aiogram==3.30.0
+apscheduler==3.11.3
+aiosqlite==0.22.1
+python-dotenv==1.2.2
