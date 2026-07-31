@@ -26,12 +26,13 @@ log = logging.getLogger(__name__)
 
 HELP = """<b>Video broadcaster</b>
 
-Post videos into the vault channel and I register them automatically.
-Every cycle I pick the least-recently-sent video and copy it to every group.
+Post anything into the vault channel — text, photo, video, document,
+album — and I register it. Every cycle I pick the least-recently-sent
+post and copy it to every group.
 
 <b>Commands</b>
 /status - counts, interval, next run
-/videos - the rotation queue
+/posts - the rotation queue (alias: /videos)
 /remove &lt;id&gt; - drop a video from rotation (/restore to undo)
 /groups - active target groups
 /sendnow [id] - broadcast right now (optionally a specific video id)
@@ -57,6 +58,45 @@ Fill both into <code>.env</code> and restart me.
 
 def _fmt_dt(value) -> str:
     return value.strftime("%Y-%m-%d %H:%M UTC") if value else "not scheduled"
+
+
+# Service messages and the handful of types copyMessage refuses. Everything else
+# — text, photo, video, document, audio, voice, sticker, poll, location … — is
+# copied verbatim into the target groups.
+UNCOPYABLE = {
+    "invoice", "successful_payment", "refunded_payment", "passport_data",
+    "giveaway", "giveaway_created", "giveaway_completed", "giveaway_winners",
+    "story", "paid_media", "game", "web_app_data", "unknown",
+    # chat lifecycle / service events
+    "new_chat_members", "left_chat_member", "new_chat_title", "new_chat_photo",
+    "delete_chat_photo", "group_chat_created", "supergroup_chat_created",
+    "channel_chat_created", "migrate_to_chat_id", "migrate_from_chat_id",
+    "pinned_message", "connected_website", "proximity_alert_triggered",
+    "message_auto_delete_timer_changed", "chat_background_set", "boost_added",
+    "video_chat_scheduled", "video_chat_started", "video_chat_ended",
+    "video_chat_participants_invited", "write_access_allowed", "users_shared",
+    "user_shared", "chat_shared", "forum_topic_created", "forum_topic_edited",
+    "forum_topic_closed", "forum_topic_reopened", "general_forum_topic_hidden",
+    "general_forum_topic_unhidden", "gift", "unique_gift", "gift_upgrade_sent",
+    "chat_owner_changed", "chat_owner_left", "community_chat_added",
+    "community_chat_removed", "direct_message_price_changed",
+    "paid_message_price_changed", "managed_bot_created",
+    "suggested_post_approved", "suggested_post_approval_failed",
+    "suggested_post_declined", "suggested_post_paid", "suggested_post_refunded",
+    "checklist_tasks_added", "checklist_tasks_done",
+    "poll_option_added", "poll_option_deleted",
+}
+
+
+def _file_id(message: Message) -> str | None:
+    """Best-effort file_id, for reference only — sending goes via message_id."""
+    for attr in ("video", "animation", "video_note", "document", "audio", "voice", "sticker"):
+        obj = getattr(message, attr, None)
+        if obj is not None:
+            return obj.file_id
+    if message.photo:
+        return message.photo[-1].file_id
+    return None
 
 
 def describe_origin(message: Message) -> str | None:
@@ -116,25 +156,15 @@ def build_router(
     # ---------- vault ingestion ----------
 
     async def ingest(message: Message) -> None:
-        if message.video:
-            kind, file_id = "video", message.video.file_id
-        elif message.animation:
-            kind, file_id = "animation", message.animation.file_id
-        elif message.video_note:
-            kind, file_id = "video_note", message.video_note.file_id
-        elif message.document and (message.document.mime_type or "").startswith("video/"):
-            kind, file_id = "document", message.document.file_id
-        else:
+        kind = str(message.content_type)
+
+        if kind in UNCOPYABLE:
             if message.chat.id == cfg.vault_chat_id:
-                log.info(
-                    "Ignored a %s in the vault — only videos, GIFs, video notes and "
-                    "video documents go into rotation.",
-                    message.content_type,
-                )
+                log.info("Ignored a %s in the vault — Telegram cannot copy this type.", kind)
             return
 
-        # Loud about mismatches: a wrong VAULT_CHAT_ID otherwise looks like the
-        # bot silently doing nothing, which is painful to debug.
+        # Setup mode: surface the id of wherever this arrived, so the user can
+        # copy it into .env. Registration below keeps this to the vault once known.
         if cfg.vault_chat_id is None:
             log.warning(
                 "Got a %s from chat %s (%s) but VAULT_CHAT_ID is unset. "
@@ -142,23 +172,31 @@ def build_router(
                 kind, message.chat.id, message.chat.title, message.chat.id,
             )
             return
-        if message.chat.id != cfg.vault_chat_id:
-            log.warning(
-                "Ignoring %s from chat %s (%s) — configured vault is %s",
-                kind, message.chat.id, message.chat.title, cfg.vault_chat_id,
-            )
+
+        group_id = message.media_group_id
+        created = await db.add_video(
+            message.message_id,
+            message.caption or message.text,
+            kind,
+            _file_id(message),
+            group_id,
+        )
+        if not created:
             return
 
-        created = await db.add_video(message.message_id, message.caption, kind, file_id)
-        if created:
-            total = await db.count_videos()
-            await notify_admins(
-                f"➕ Added {kind} to rotation (msg {message.message_id}). Queue size: {total}."
-            )
+        # An album arrives as several updates. Announce it once, on the first part,
+        # so a 10-photo post doesn't produce 10 notifications.
+        if group_id and await db.album_size(group_id) > 1:
+            return
 
-    MEDIA = F.video | F.animation | F.video_note | F.document
-    router.channel_post.register(ingest, MEDIA)
-    router.message.register(ingest, MEDIA, F.chat.type != "private")
+        total = await db.count_videos()
+        label = "album" if group_id else kind
+        await notify_admins(
+            f"➕ Added {label} to rotation (msg {message.message_id}). Queue size: {total}."
+        )
+
+    # Registration happens further down, after the commands, so that /here and
+    # friends still work in groups.
 
     # ---------- group membership ----------
 
@@ -254,13 +292,13 @@ def build_router(
             f"Up next: {('#' + str(upcoming.id) + ' ' + _short(upcoming.caption)) if upcoming else '<i>nothing</i>'}"
         )
 
-    @router.message(Command("videos"))
-    async def cmd_videos(message: Message) -> None:
+    @router.message(Command("posts", "videos"))
+    async def cmd_posts(message: Message) -> None:
         if not is_admin(message):
             return
         videos = await db.list_videos(limit=20)
         if not videos:
-            await message.answer("Vault is empty. Post a video into the vault channel.")
+            await message.answer("Vault is empty. Post something into the vault channel.")
             return
         lines = [
             f"<code>#{v.id}</code> {_short(v.caption)} — sent {v.times_sent}x" for v in videos
@@ -381,6 +419,31 @@ def build_router(
             return
         await db.set_paused(False)
         await message.answer(f"Resumed. Next run {_fmt_dt(next_run(scheduler))}.")
+
+    # ---------- vault ingestion, registered after the commands ----------
+
+    MEDIA = F.video | F.animation | F.video_note | F.document | F.photo | F.audio
+
+    if cfg.vault_chat_id is None:
+        # Setup mode: watch everywhere so the vault id shows up in the logs.
+        router.channel_post.register(ingest, MEDIA)
+        router.message.register(ingest, MEDIA, F.chat.type != "private")
+    else:
+        in_vault = F.chat.id == cfg.vault_chat_id
+        router.channel_post.register(ingest, in_vault)
+        router.message.register(ingest, in_vault)
+
+        # Media landing in some other chat is nearly always a wrong VAULT_CHAT_ID
+        # or a same-named chat. Worth one clear line — but only for media, so
+        # ordinary group chatter doesn't fill the log.
+        async def warn_wrong_chat(message: Message) -> None:
+            log.warning(
+                "Ignoring %s from chat %s (%s) — configured vault is %s",
+                message.content_type, message.chat.id, message.chat.title, cfg.vault_chat_id,
+            )
+
+        router.channel_post.register(warn_wrong_chat, MEDIA)
+        router.message.register(warn_wrong_chat, MEDIA, F.chat.type != "private")
 
     # ---------- catch-all, registered last so it only sees leftovers ----------
     # Turns aiogram's bare "Update is not handled" into something diagnosable.

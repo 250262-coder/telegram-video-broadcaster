@@ -23,6 +23,10 @@ log = logging.getLogger(__name__)
 MAX_ATTEMPTS = 3
 CAPTION_LIMIT = 1024
 
+# Only these carry a caption. Passing caption= for anything else (a text post,
+# a poll, a sticker) makes Telegram reject the copy.
+CAPTIONABLE = {"photo", "video", "animation", "audio", "document", "voice", "paid_media"}
+
 
 @dataclass
 class CycleResult:
@@ -52,9 +56,13 @@ class Broadcaster:
         self._lock = asyncio.Lock()
 
     def _caption_for(self, video: Video) -> str | None:
-        """Only override the caption when a suffix is configured, so entities survive otherwise."""
+        """Only override the caption when a suffix is configured, so entities survive otherwise.
+
+        Returns None for post types that have no caption field, and for albums,
+        where copy_messages offers no per-message caption.
+        """
         suffix = self.cfg.caption_suffix
-        if not suffix:
+        if not suffix or video.media_group_id or video.kind not in CAPTIONABLE:
             return None
         base = video.caption or ""
         merged = f"{base}\n\n{suffix}".strip() if base else suffix
@@ -89,9 +97,16 @@ class Broadcaster:
 
             result = CycleResult(video=video)
             caption = self._caption_for(video)
+            album = (
+                await self.db.album_message_ids(video.media_group_id)
+                if video.media_group_id
+                else None
+            )
 
             for index, group in enumerate(groups):
-                ok, dropped, detail = await self._send_to_group(video, group.chat_id, caption)
+                ok, dropped, detail = await self._send_to_group(
+                    video, group.chat_id, caption, album
+                )
                 if ok:
                     result.sent += 1
                     await self.db.log_send(video.id, group.chat_id, "sent")
@@ -110,17 +125,29 @@ class Broadcaster:
             return result
 
     async def _send_to_group(
-        self, video: Video, chat_id: int, caption: str | None
+        self,
+        video: Video,
+        chat_id: int,
+        caption: str | None,
+        album: list[int] | None = None,
     ) -> tuple[bool, bool, str | None]:
         """Returns (success, group_dropped, error_detail)."""
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
-                await self.bot.copy_message(
-                    chat_id=chat_id,
-                    from_chat_id=self.cfg.vault_chat_id,
-                    message_id=video.message_id,
-                    caption=caption,
-                )
+                if album and len(album) > 1:
+                    # copy_messages keeps the album grouped in one bubble.
+                    await self.bot.copy_messages(
+                        chat_id=chat_id,
+                        from_chat_id=self.cfg.vault_chat_id,
+                        message_ids=album,
+                    )
+                else:
+                    await self.bot.copy_message(
+                        chat_id=chat_id,
+                        from_chat_id=self.cfg.vault_chat_id,
+                        message_id=video.message_id,
+                        caption=caption,
+                    )
                 return True, False, None
 
             except TelegramRetryAfter as exc:

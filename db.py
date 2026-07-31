@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS videos (
     file_id      TEXT,
     caption      TEXT,
     kind         TEXT NOT NULL DEFAULT 'video',
+    media_group_id TEXT,
     active       BOOLEAN NOT NULL DEFAULT TRUE,
     times_sent   INTEGER NOT NULL DEFAULT 0,
     last_sent_at TIMESTAMPTZ,
@@ -50,11 +51,23 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
+-- Additive migration for databases created before album support.
+ALTER TABLE videos ADD COLUMN IF NOT EXISTS media_group_id TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_send_log_sent_at ON send_log (sent_at);
 CREATE INDEX IF NOT EXISTS idx_videos_rotation ON videos (active, times_sent, last_sent_at);
+CREATE INDEX IF NOT EXISTS idx_videos_album ON videos (media_group_id);
 """
 
-VIDEO_COLUMNS = "id, message_id, caption, kind, times_sent, last_sent_at"
+VIDEO_COLUMNS = "id, message_id, caption, kind, times_sent, last_sent_at, media_group_id"
+
+# An album arrives as several messages sharing a media_group_id. Only the lowest
+# message_id represents the post in rotation; the rest are sent alongside it.
+LEADER_ONLY = """
+    (v.media_group_id IS NULL
+     OR v.message_id = (SELECT min(v2.message_id) FROM videos v2
+                        WHERE v2.media_group_id = v.media_group_id))
+"""
 
 
 def utcnow() -> datetime:
@@ -63,12 +76,15 @@ def utcnow() -> datetime:
 
 @dataclass
 class Video:
+    """One post in the rotation. For an album, the first message of the group."""
+
     id: int
     message_id: int
     caption: str | None
     kind: str
     times_sent: int
     last_sent_at: datetime | None
+    media_group_id: str | None = None
 
 
 @dataclass
@@ -117,17 +133,39 @@ class Database:
     # ---------- videos ----------
 
     async def add_video(
-        self, message_id: int, caption: str | None, kind: str, file_id: str | None
+        self,
+        message_id: int,
+        caption: str | None,
+        kind: str,
+        file_id: str | None,
+        media_group_id: str | None = None,
     ) -> bool:
         """Returns True if newly inserted, False if this message_id was already known."""
         row = await self.pool.fetchval(
-            """INSERT INTO videos (message_id, file_id, caption, kind)
-               VALUES ($1, $2, $3, $4)
+            """INSERT INTO videos (message_id, file_id, caption, kind, media_group_id)
+               VALUES ($1, $2, $3, $4, $5)
                ON CONFLICT (message_id) DO NOTHING
                RETURNING id""",
-            message_id, file_id, caption, kind,
+            message_id, file_id, caption, kind, media_group_id,
         )
         return row is not None
+
+    async def album_size(self, media_group_id: str) -> int:
+        """How many messages of this album we've stored so far."""
+        return int(
+            await self.pool.fetchval(
+                "SELECT count(*) FROM videos WHERE media_group_id = $1", media_group_id
+            )
+            or 0
+        )
+
+    async def album_message_ids(self, media_group_id: str) -> list[int]:
+        rows = await self.pool.fetch(
+            """SELECT message_id FROM videos WHERE media_group_id = $1
+               ORDER BY message_id ASC""",
+            media_group_id,
+        )
+        return [r["message_id"] for r in rows]
 
     async def remove_video(self, message_id: int) -> bool:
         row = await self.pool.fetchval(
@@ -136,23 +174,38 @@ class Database:
         return row is not None
 
     async def deactivate_video(self, video_id: int) -> bool:
-        """Pull a video out of rotation but keep the row so send_log stays meaningful."""
+        """Pull a post out of rotation, keeping the row so send_log stays meaningful.
+
+        Removing an album removes all of its parts.
+        """
         row = await self.pool.fetchval(
-            "UPDATE videos SET active = FALSE WHERE id = $1 AND active RETURNING id", video_id
+            """UPDATE videos SET active = FALSE
+               WHERE active
+                 AND (id = $1
+                      OR (media_group_id IS NOT NULL
+                          AND media_group_id = (SELECT media_group_id FROM videos WHERE id = $1)))
+               RETURNING id""",
+            video_id,
         )
         return row is not None
 
     async def restore_video(self, video_id: int) -> bool:
         row = await self.pool.fetchval(
-            "UPDATE videos SET active = TRUE WHERE id = $1 AND NOT active RETURNING id", video_id
+            """UPDATE videos SET active = TRUE
+               WHERE NOT active
+                 AND (id = $1
+                      OR (media_group_id IS NOT NULL
+                          AND media_group_id = (SELECT media_group_id FROM videos WHERE id = $1)))
+               RETURNING id""",
+            video_id,
         )
         return row is not None
 
     async def next_video(self) -> Video | None:
         """Least-recently-used rotation: fewest sends first, oldest send as tiebreaker."""
         row = await self.pool.fetchrow(
-            f"""SELECT {VIDEO_COLUMNS} FROM videos
-                WHERE active
+            f"""SELECT {VIDEO_COLUMNS} FROM videos v
+                WHERE active AND {LEADER_ONLY}
                 ORDER BY times_sent ASC, last_sent_at ASC NULLS FIRST, id ASC
                 LIMIT 1"""
         )
@@ -160,13 +213,14 @@ class Database:
 
     async def get_video(self, video_id: int) -> Video | None:
         row = await self.pool.fetchrow(
-            f"SELECT {VIDEO_COLUMNS} FROM videos WHERE id = $1", video_id
+            f"SELECT {VIDEO_COLUMNS} FROM videos v WHERE id = $1", video_id
         )
         return Video(**dict(row)) if row else None
 
     async def list_videos(self, limit: int = 20) -> list[Video]:
         rows = await self.pool.fetch(
-            f"""SELECT {VIDEO_COLUMNS} FROM videos WHERE active
+            f"""SELECT {VIDEO_COLUMNS} FROM videos v
+                WHERE active AND {LEADER_ONLY}
                 ORDER BY times_sent ASC, id ASC LIMIT $1""",
             limit,
         )
@@ -174,18 +228,28 @@ class Database:
 
     async def list_removed(self, limit: int = 20) -> list[Video]:
         rows = await self.pool.fetch(
-            f"""SELECT {VIDEO_COLUMNS} FROM videos WHERE NOT active
+            f"""SELECT {VIDEO_COLUMNS} FROM videos v
+                WHERE NOT active AND {LEADER_ONLY}
                 ORDER BY id DESC LIMIT $1""",
             limit,
         )
         return [Video(**dict(r)) for r in rows]
 
     async def count_videos(self) -> int:
-        return int(await self.pool.fetchval("SELECT count(*) FROM videos WHERE active") or 0)
+        return int(
+            await self.pool.fetchval(
+                f"SELECT count(*) FROM videos v WHERE active AND {LEADER_ONLY}"
+            )
+            or 0
+        )
 
     async def mark_video_sent(self, video_id: int) -> None:
+        """Bump the whole album together, so its parts stay in step in the rotation."""
         await self.pool.execute(
-            "UPDATE videos SET times_sent = times_sent + 1, last_sent_at = now() WHERE id = $1",
+            """UPDATE videos SET times_sent = times_sent + 1, last_sent_at = now()
+               WHERE id = $1
+                  OR (media_group_id IS NOT NULL
+                      AND media_group_id = (SELECT media_group_id FROM videos WHERE id = $1))""",
             video_id,
         )
 

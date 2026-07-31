@@ -1,13 +1,13 @@
 # Telegram marketing video broadcaster
 
-Posts videos from a private "vault" channel into every group the bot is in, on a fixed interval (default every 4h, changeable to 3 or 5 with one command). Rotates through the whole video pool so groups don't see the same clip twice in a row.
+Copies posts from a private "vault" channel into every group the bot is in, on a fixed interval (default every 4h, changeable with one command). Any content type works — text, photos, videos, documents, albums. Rotates through the whole pool so groups don't see the same post twice in a row.
 
-**No video files are stored anywhere.** Telegram holds them; this bot stores only the `message_id` of each video inside your vault channel and uses `copyMessage` to post it. No S3, no disk, no re-uploading, no bandwidth cost.
+**No files are stored anywhere.** Telegram holds them; this bot stores only the `message_id` of each post inside your vault channel and uses `copyMessage` to repost it. No S3, no disk, no re-uploading, no bandwidth cost.
 
 ## How it works
 
 ```
-you upload video ──▶ private vault channel ──▶ bot records message_id in Postgres
+you post anything ──▶ private vault channel ──▶ bot records message_id in Postgres
                                                         │
                                     every N hours, pick least-recently-sent
                                                         │
@@ -53,7 +53,7 @@ Paste both into `.env` and restart. Full walkthrough in [TESTING.md](TESTING.md)
 
 **6. Load videos and groups**
 
-- Upload videos into the vault channel. Each one gets registered automatically and you get a DM confirmation. (Upload from your Telegram app, not through the bot — that way you're not capped at the 50MB bot upload limit; the vault accepts up to 2GB per file.)
+- Post into the vault channel — text, photos, videos, documents, albums all work. Each post gets registered automatically and you get a DM confirmation. (Upload from your Telegram app, not through the bot — that way you're not capped at the 50MB bot upload limit; the vault accepts up to 2GB per file.)
 - Add the bot to each target group. It registers itself on join. If it was already in a group before the bot ran, send `/here` in that group.
 - First broadcast fires 2 minutes after a cold start, then every N hours.
 
@@ -64,10 +64,10 @@ Paste both into `.env` and restart. Full walkthrough in [TESTING.md](TESTING.md)
 | Command | What it does |
 |---|---|
 | `/status` | Counts, interval, next run, what's up next |
-| `/videos` | The rotation queue, next first |
-| `/remove 3` | Drop video #3 from rotation; `/restore 3` undoes it, `/restore` lists removed |
+| `/posts` | The rotation queue, next first (alias `/videos`) |
+| `/remove 3` | Drop post #3 from rotation; `/restore 3` undoes it, `/restore` lists removed |
 | `/groups` | Active target groups |
-| `/sendnow` | Broadcast immediately; `/sendnow 12` for a specific video |
+| `/sendnow` | Broadcast immediately; `/sendnow 12` for a specific post |
 | `/interval 3` | Change cadence to every 3 hours (decimals fine: `0.5`) |
 | `/pause` / `/resume` | Stop and restart scheduled broadcasts |
 | `/here` | Register the group you send it in |
@@ -139,7 +139,9 @@ one produces `Conflict: terminated by other getUpdates request` in both logs.
 ## Notes
 
 - `CAPTION_SUFFIX` appends a CTA to every caption. It rewrites the caption, so bold/links in the *original* caption lose their formatting — put HTML in the suffix itself, or leave the setting blank to copy captions untouched.
-- Photos and text posts in the vault are ignored. Videos, GIFs/animations, and video documents are registered.
+- Every content type Telegram can copy is registered: text, photos, videos, GIFs, documents, audio, voice, stickers, polls, locations. Service messages, invoices, giveaways and stories are skipped because `copyMessage` refuses them.
+- **Albums** (multi-photo/video posts) count as one entry and are reposted grouped, via `copyMessages`. Removing one removes the whole album.
+- `CAPTION_SUFFIX` is skipped for albums and for types without a caption field (text, polls, stickers) — Telegram rejects a caption on those.
 - Deleting a video from the vault channel: the bot drops it from rotation the first time a copy fails with "message to copy not found".
 - `send_log` keeps a row per (video, group, outcome). Handy for proving delivery: `psql "$DATABASE_URL" -c 'select * from send_log order by id desc limit 20'`.
 
@@ -148,7 +150,9 @@ one produces `Conflict: terminated by other getUpdates request` in both logs.
 ```
 bot.py            entrypoint: DI wiring, polling, scheduler start
 config.py         .env parsing and validation
-db.py             Postgres schema + queries via asyncpg (videos, groups, send_log, settings)
+db.py             Postgres schema + queries via asyncpg (posts, groups, send_log, settings)
+check_db.py       one-shot DATABASE_URL verifier with plain-English errors
+tests/run_tests.py offline suite: SQL syntax + behaviour, no server needed
 broadcaster.py    the fan-out loop: copy_message, delays, retries, backoff
 handlers.py       commands, vault ingestion, group join/leave tracking
 scheduling.py     APScheduler interval job, restart-safe next-run calculation
